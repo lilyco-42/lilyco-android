@@ -35,27 +35,8 @@ async function downloadTo(url, dest) {
   fs.writeFileSync(dest, buf);
 }
 
-// 下载并解包一个 Termux .deb 到 `RES/usr`（.deb 内层是 data/data/com.termux/files/usr）
-async function extractDeb(url) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "deb-"));
-  try {
-    const deb = path.join(tmp, "_pkg.deb");
-    await downloadTo(url, deb);
-    sh(`cd "${tmp}" && ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
-    const inner = path.join(tmp, "data", "data", "com.termux", "files", "usr");
-    if (fs.existsSync(inner)) {
-      // 先剔除纯文档/手册目录：Termux 包里常有指向兄弟包的相对 symlink
-      // （如 usr/share/doc/ffmpeg/copyright -> ../libavcodec/copyright），
-      // 解引用复制时若目标包未在本批里会变成死链导致 cp -aL 报错。
-      sh(`rm -rf "${inner}/share/doc" "${inner}/share/man" "${inner}/share/lintian" "${inner}/share/info"`, tmp);
-      // 用 Node 自己递归复制（无 shell 展开），逐个解引用 symlink；遇到坏链直接跳过。
-      copyTreeDeref(inner, path.join(RES, "usr"));
-    }
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-}
-
+// 用 Node 递归复制并解引用 symlink；遇到指向本批之外（坏链）的直接跳过，
+// 避免 cp -aL 因指向兄弟包的文档相对链接报错。
 function copyTreeDeref(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
@@ -67,7 +48,7 @@ function copyTreeDeref(src, dst) {
         const st = fs.statSync(real);
         if (st.isDirectory()) copyTreeDeref(real, d);
         else if (st.isFile()) fs.copyFileSync(real, d);
-      } catch { /* 坏链：跳过，避免 Tauri 资源校验失败 */ }
+      } catch { /* 坏链跳过 */ }
       continue;
     }
     if (ent.isDirectory()) copyTreeDeref(s, d);
@@ -75,45 +56,61 @@ function copyTreeDeref(src, dst) {
   }
 }
 
-// 解析 Termux 依赖闭包：下载 Packages 索引，BFS 收集 seed 包及其全部依赖的 .deb
+async function extractDeb(url) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "deb-"));
+  try {
+    const deb = path.join(tmp, "_pkg.deb");
+    await downloadTo(url, deb);
+    sh(`cd "${tmp}" && ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
+    const inner = path.join(tmp, "data", "data", "com.termux", "files", "usr");
+    if (fs.existsSync(inner)) {
+      // 先剔除纯文档/手册：常有指向兄弟包的相对 symlink（如 share/doc/ffmpeg/copyright
+      // -> ../libavcodec/copyright），解引用复制时若目标包未在本批里就是坏链。
+      sh(`rm -rf "${inner}/share/doc" "${inner}/share/man" "${inner}/share/lintian" "${inner}/share/info"`, tmp);
+      copyTreeDeref(inner, path.join(RES, "usr"));
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// 解析 Termux 依赖闭包：下载 aarch64 Packages 索引，按 stanza 解析 Package/Filename/Depends，
+// BFS 收集 seed 包及其全部依赖的 .deb。
 async function resolveTermuxDeps(seedUrls) {
   console.log("下载 Termux Packages 索引 (aarch64)...");
   const idxText = await (await fetch(TERMUX_PKGS_IDX)).text();
-  // 按 stanza 解析：Package / Filename / Depends
-  const blocks = idxText.split(/\n\n+/).filter(b => /\nPackage: /.test(b));
+  const blocks = idxText.split(/\n\n+/).filter((b) => /^Package: /m.test(b));
   const byName = new Map();
-  const filenameByPkg = new Map();
   for (const b of blocks) {
-    const pkg = (b.match(/\nPackage: (\S+)/) || [])[1];
-    const fnm = (b.match(/\nFilename: (\S+)/) || [])[1];
+    const pkg = (b.match(/^Package: (\S+)/m) || [])[1];
+    const fnm = (b.match(/^Filename: (\S+)/m) || [])[1];
     if (!pkg || !fnm) continue;
     byName.set(pkg, `${TERMUX_APT}/${fnm}`);
-    filenameByPkg.set(pkg, fnm);
   }
-  const seedNames = seedUrls.map(u => path.basename(u).split("_")[0]);
+  const seedNames = seedUrls.map((u) => path.basename(u).split("_")[0]);
   const seen = new Set();
   const queue = [...seedNames];
   while (queue.length) {
     const name = queue.shift();
     if (seen.has(name)) continue;
     seen.add(name);
-    const b = blocks.find(x => new RegExp(`\\nPackage: ${name}\\n`).test(x));
+    const b = blocks.find((x) => x.split("\n").some((l) => l === `Package: ${name}`));
     if (!b) continue;
-    const m = /\nDepends: (.+)/.exec(b);
+    const m = /^Depends: (.+)/m.exec(b);
     if (!m) continue;
     for (const part of m[1].split(",")) {
       const dep = part.split(/\s*\|\s*/)[0].trim().split(/\s+/)[0].split("(")[0].trim();
       if (byName.has(dep) && !seen.has(dep)) queue.push(dep);
     }
   }
-  const urls = [...seen].map(n => byName.get(n)).filter(Boolean);
+  const urls = [...seen].map((n) => byName.get(n)).filter(Boolean);
   console.log(`解析到 ${urls.length} 个 Termux 包（含依赖）：` + [...seen].join(", "));
   return urls;
 }
 
 async function main() {
-  // 先彻底清空上一次（或历史失败）留下的运行时树与可能的 _deb_* 残留，
-  // 再重新生成，确保 Tauri 打包时 resources/runtime 里只有真实文件、无死链。
+  // 先彻底清空上一轮（或历史失败）留下的运行时树，确保 Tauri 打包时
+  // resources/runtime 里只有真实文件、无残留死链。
   fs.rmSync(RES, { recursive: true, force: true });
   ensureDir(RES);
   ensureDir(BIN);
@@ -139,8 +136,12 @@ async function main() {
   sh(`tar -xzf "${ytgz}" -C "${yt}" --strip-components=1`, RES);
   fs.rmSync(ytgz, { force: true });
 
+  // 硬校验：python3 / ffmpeg / yt-dlp 缺一不可，否则打出假绿 APK
+  const py = fs.existsSync(path.join(RES, "usr/bin/python3"));
+  const ff = fs.existsSync(path.join(RES, "usr/bin/ffmpeg"));
+  const ytOk = fs.existsSync(path.join(RES, "yt-dlp", "yt_dlp", "__main__.py"));
   console.log("CI prep done: runtime at", RES);
-  console.log("python3:", fs.existsSync(path.join(RES, "usr/bin/python3")) ? "ok" : "MISSING");
-  console.log("ffmpeg:", fs.existsSync(path.join(RES, "usr/bin/ffmpeg")) ? "ok" : "MISSING");
+  console.log("python3:", py ? "ok" : "MISSING", "| ffmpeg:", ff ? "ok" : "MISSING", "| yt-dlp:", ytOk ? "ok" : "MISSING");
+  if (!py || !ff || !ytOk) throw new Error("Termux 运行时不完整或 yt-dlp 缺失，拒绝继续构建");
 }
 main().catch((e) => { console.error(e); process.exit(1); });
