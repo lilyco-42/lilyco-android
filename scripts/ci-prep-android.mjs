@@ -39,64 +39,75 @@ async function downloadTo(url, dest) {
 async function extractDeb(url) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "deb-"));
   try {
-  const deb = path.join(tmp, "_pkg.deb");
-  await downloadTo(url, deb);
-  sh(`cd "${tmp}" && ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
-  const inner = path.join(tmp, "data", "data", "com.termux", "files", "usr");
-  if (fs.existsSync(inner)) {
-    // -L 解引用符号链接：Termux .deb 里 usr/share/doc/*/copyright 等常是
-    // 指向兄弟包文档的 symlink，在我们这份局部树会是死链，会让 Tauri 资源校验报
-    // "resource path ... doesn't exist"。解引用成实体文件即可。
-    sh(`cp -aL "${inner}/." "${RES}/usr/"`, RES);
-    // 丢掉纯文档/手册，省体积也避免残留死链
-    sh(`rm -rf "${RES}/usr/share/doc" "${RES}/usr/share/man" "${RES}/usr/share/lintian" "${RES}/usr/share/info"`, RES);
-  }
-  fs.rmSync(tmp, { recursive: true, force: true });
-
+    const deb = path.join(tmp, "_pkg.deb");
+    await downloadTo(url, deb);
+    sh(`cd "${tmp}" && ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
+    const inner = path.join(tmp, "data", "data", "com.termux", "files", "usr");
+    if (fs.existsSync(inner)) {
+      // 先剔除纯文档/手册目录：Termux 包里常有指向兄弟包的相对 symlink
+      // （如 usr/share/doc/ffmpeg/copyright -> ../libavcodec/copyright），
+      // 解引用复制时若目标包未在本批里会变成死链导致 cp -aL 报错。
+      sh(`rm -rf "${inner}/share/doc" "${inner}/share/man" "${inner}/share/lintian" "${inner}/share/info"`, tmp);
+      // 用 Node 自己递归复制（无 shell 展开），逐个解引用 symlink；遇到坏链直接跳过。
+      copyTreeDeref(inner, path.join(RES, "usr"));
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 
+function copyTreeDeref(src, dst) {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, ent.name);
+    const d = path.join(dst, ent.name);
+    if (ent.isSymbolicLink()) {
+      try {
+        const real = fs.realpathSync(s);
+        const st = fs.statSync(real);
+        if (st.isDirectory()) copyTreeDeref(real, d);
+        else if (st.isFile()) fs.copyFileSync(real, d);
+      } catch { /* 坏链：跳过，避免 Tauri 资源校验失败 */ }
+      continue;
+    }
+    if (ent.isDirectory()) copyTreeDeref(s, d);
+    else if (ent.isFile()) fs.copyFileSync(s, d);
+  }
+}
+
 // 解析 Termux 依赖闭包：下载 Packages 索引，BFS 收集 seed 包及其全部依赖的 .deb
 async function resolveTermuxDeps(seedUrls) {
-  console.log("下载 Termux Packages 索引...");
+  console.log("下载 Termux Packages 索引 (aarch64)...");
   const idxText = await (await fetch(TERMUX_PKGS_IDX)).text();
+  // 按 stanza 解析：Package / Filename / Depends
+  const blocks = idxText.split(/\n\n+/).filter(b => /\nPackage: /.test(b));
   const byName = new Map();
-  for (const block of idxText.split(/\n\n+/)) {
-    const pkg = /\nPackage: (.+)/.exec(block)?.[1];
-    const fn = /\nFilename: (.+)/.exec(block)?.[1];
-    if (pkg && fn) byName.set(pkg, `${TERMUX_APT}/${fn}`);
+  const filenameByPkg = new Map();
+  for (const b of blocks) {
+    const pkg = (b.match(/\nPackage: (\S+)/) || [])[1];
+    const fnm = (b.match(/\nFilename: (\S+)/) || [])[1];
+    if (!pkg || !fnm) continue;
+    byName.set(pkg, `${TERMUX_APT}/${fnm}`);
+    filenameByPkg.set(pkg, fnm);
   }
-  const depRe = /\nDepends: (.+)/;
-  const seeds = seedUrls.map((u) => path.basename(u, ".deb").replace(/_aarch64$/, "").replace(/_\d.*$/, ""));
-  // 上面粗取包名不稳，改为从索引反查：按 Filename 末尾 pool 路径的包名
-  const seedNames = [];
-  for (const u of seedUrls) {
-    const bn = path.basename(u);
-    // 形如 python_3.14.10_aarch64.deb -> 取第一个下划线前的名字
-    const name = bn.split("_")[0];
-    seedNames.push(name);
-    if (!byName.has(name)) byName.set(name, u); // 直接 URL 兜底
-  }
+  const seedNames = seedUrls.map(u => path.basename(u).split("_")[0]);
   const seen = new Set();
   const queue = [...seedNames];
   while (queue.length) {
     const name = queue.shift();
     if (seen.has(name)) continue;
     seen.add(name);
-    const block = [...idxText.split(/\n\n+/)].find((b) => new RegExp(`\\nPackage: ${name}\\n`).test(b));
-    if (!block) continue;
-    const m = depRe.exec(block);
+    const b = blocks.find(x => new RegExp(`\\nPackage: ${name}\\n`).test(x));
+    if (!b) continue;
+    const m = /\nDepends: (.+)/.exec(b);
     if (!m) continue;
     for (const part of m[1].split(",")) {
       const dep = part.split(/\s*\|\s*/)[0].trim().split(/\s+/)[0].split("(")[0].trim();
       if (byName.has(dep) && !seen.has(dep)) queue.push(dep);
     }
   }
-  const urls = [];
-  for (const name of seen) if (byName.has(name)) urls.push(byName.get(name));
-  console.log(`解析到 ${urls.length} 个 Termux 包（含依赖）`);
+  const urls = [...seen].map(n => byName.get(n)).filter(Boolean);
+  console.log(`解析到 ${urls.length} 个 Termux 包（含依赖）：` + [...seen].join(", "));
   return urls;
 }
 
