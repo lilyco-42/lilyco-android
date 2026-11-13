@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/runtime/
+src-tauri/binaries/lycodl-aarch64-linux-android
+*.deb
+

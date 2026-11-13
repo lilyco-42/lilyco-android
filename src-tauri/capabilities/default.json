@@ -1,0 +1,20 @@
+{
+  "identifier": "default",
+  "description": "主窗口：拉起 lycodl sidecar、打开 WebView 控制台",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "binaries/lycodl", "sidecar": true }]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "pkill", "cmd": true }]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "xdg-open", "cmd": true }]
+    }
+  ]
+}

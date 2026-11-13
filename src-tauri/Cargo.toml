@@ -1,0 +1,35 @@
+[package]
+name = "lilyco-android"
+version = "0.1.0"
+edition = "2021"
+description = "lilyco 移动端模板：把任意 lilyco CLI 作为 sidecar 带进 App，lycodl 是第一个消费方"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "lilyco_android_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "lilyco-android"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2" }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
