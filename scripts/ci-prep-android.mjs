@@ -95,7 +95,7 @@ async function main() {
   // 1) lycodl sidecar -> binaries/lycodl-aarch64-linux-android
   const lycodlTar = path.join(BIN, "lycodl-android.tar.gz");
   await downloadTo(LYCODL_RELEASE, lycodlTar);
-  sh(`tar -xzf "${lycodlTar}" && mv lycodl-android-aarch64/lycodl binaries/lycodl-aarch64-linux-android && chmod +x binaries/lycodl-aarch64-linux-android`, BIN);
+  sh(`tar -xzf "${lycodlTar}" && mv lycodl-android-aarch64/lycodl lycodl-aarch64-linux-android && chmod +x lycodl-aarch64-linux-android`, BIN);
   fs.rmSync(lycodlTar, { force: true });
 
   // 2) Termux python3 + ffmpeg（含依赖闭包）-> resources/runtime/usr/{bin,lib}
