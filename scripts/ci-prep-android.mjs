@@ -6,6 +6,7 @@
 // python3 + ffmpeg 预编译 .deb 连同依赖一起解包，随 APK 分发，再配 yt-dlp 纯 Python 源码，
 // 用一个包装脚本把 LYCODL_YTDLP 指过去，让 lycodl 走 Termux python 而非官方 glibc 二进制。
 import { execSync } from "node:child_process";
+import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -36,8 +37,8 @@ async function downloadTo(url, dest) {
 
 // 下载并解包一个 Termux .deb 到 `RES/usr`（.deb 内层是 data/data/com.termux/files/usr）
 async function extractDeb(url) {
-  const tmp = path.join(RES, "_deb_" + Date.now());
-  ensureDir(tmp);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "deb-"));
+  try {
   const deb = path.join(tmp, "_pkg.deb");
   await downloadTo(url, deb);
   sh(`cd "${tmp}" && ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
@@ -51,6 +52,10 @@ async function extractDeb(url) {
     sh(`rm -rf "${RES}/usr/share/doc" "${RES}/usr/share/man" "${RES}/usr/share/lintian" "${RES}/usr/share/info"`, RES);
   }
   fs.rmSync(tmp, { recursive: true, force: true });
+
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 // 解析 Termux 依赖闭包：下载 Packages 索引，BFS 收集 seed 包及其全部依赖的 .deb
@@ -96,6 +101,9 @@ async function resolveTermuxDeps(seedUrls) {
 }
 
 async function main() {
+  // 先彻底清空上一次（或历史失败）留下的运行时树与可能的 _deb_* 残留，
+  // 再重新生成，确保 Tauri 打包时 resources/runtime 里只有真实文件、无死链。
+  fs.rmSync(RES, { recursive: true, force: true });
   ensureDir(RES);
   ensureDir(BIN);
 
