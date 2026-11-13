@@ -31,15 +31,20 @@ async function downloadTo(url, dest) {
 
 async function extractDeb(url, into) {
   ensureDir(into);
-  const deb = path.join(into, "_pkg.deb");
-  await downloadTo(url, deb);
-  // .deb = ar 档案，解 data.tar.* 到 into（Termux 用 zst/xz/gz）
-  const tmp = path.join(into, "_deb");
+  const tmp = path.join(into, "_deb_" + Date.now());
   ensureDir(tmp);
-  sh(`ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
-  sh(`cp -a "${tmp}/usr" "${into}/"`, into);
+  const deb = path.join(tmp, "_pkg.deb");
+  await downloadTo(url, deb);
+  // Termux .deb: data.tar.* 内路径形如 data/data/com.termux/files/usr/...
+  sh(`cd "${tmp}" && ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
+  const inner = path.join(tmp, "data", "data", "com.termux", "files", "usr");
+  if (fs.existsSync(inner)) {
+    sh(`cp -a "${inner}" "${into}/usr"`, into);
+  } else {
+    // 兜底：若某些 deb 直接是 /usr 顶层（罕见），整体拷
+    sh(`cp -a "${tmp}/usr" "${into}/usr"`, into);
+  }
   fs.rmSync(tmp, { recursive: true, force: true });
-  fs.rmSync(deb, { force: true });
 }
 
 async function main() {
@@ -47,7 +52,7 @@ async function main() {
   ensureDir(BIN);
   const lycodlTar = path.join(BIN, "lycodl-android.tar.gz");
   await downloadTo(LYCODL_RELEASE, lycodlTar);
-  sh(`tar -xzf "${lycodlTar}" && mv lycodl binaries/lycodl-aarch64-linux-android && chmod +x binaries/lycodl-aarch64-linux-android`, BIN);
+  sh(`tar -xzf "${lycodlTar}" && mv lycodl-android-aarch64/lycodl binaries/lycodl-aarch64-linux-android && chmod +x binaries/lycodl-aarch64-linux-android`, BIN);
   fs.rmSync(lycodlTar, { force: true });
 
   // 2) Termux python3 + ffmpeg -> resources/runtime/usr/{bin,lib}
