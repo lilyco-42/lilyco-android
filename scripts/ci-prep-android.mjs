@@ -42,7 +42,14 @@ async function extractDeb(url) {
   await downloadTo(url, deb);
   sh(`cd "${tmp}" && ar x "${deb}" && for f in data.tar.*; do [ -e "$f" ] && tar -xf "$f" && break; done; rm -f debian-binary control.tar.* data.tar.*`, tmp);
   const inner = path.join(tmp, "data", "data", "com.termux", "files", "usr");
-  if (fs.existsSync(inner)) sh(`cp -a "${inner}/." "${RES}/usr/"`, RES);
+  if (fs.existsSync(inner)) {
+    // -L 解引用符号链接：Termux .deb 里 usr/share/doc/*/copyright 等常是
+    // 指向兄弟包文档的 symlink，在我们这份局部树会是死链，会让 Tauri 资源校验报
+    // "resource path ... doesn't exist"。解引用成实体文件即可。
+    sh(`cp -aL "${inner}/." "${RES}/usr/"`, RES);
+    // 丢掉纯文档/手册，省体积也避免残留死链
+    sh(`rm -rf "${RES}/usr/share/doc" "${RES}/usr/share/man" "${RES}/usr/share/lintian" "${RES}/usr/share/info"`, RES);
+  }
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
